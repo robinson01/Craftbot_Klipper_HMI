@@ -42,22 +42,21 @@ scr_upd = "ok  $:15677"
 #Moonraker variables
 ##############################################################
 
-in_remote_print_job = False
-
 status = "/printer/info"
 
 endpoints_machine_status = [
-    "/printer/objects/query?idle_timeout=state,printing_time",
+#    "/printer/objects/query?idle_timeout=state,printing_time",
     "/printer/objects/query?extruder=target,temperature",
     "/printer/objects/query?heater_bed=target,temperature",
     "/printer/objects/query?fan=speed",
-    "/printer/objects/query?toolhead=homed_axes,position,print_time,estimated_print_time"
-    "/printer/objects/query?idle_timeout=state,printing_time"
+    "/printer/objects/query?toolhead=homed_axes,position,print_time,estimated_print_time",
+    "/printer/objects/query?print_stats=state,filename,print_duration",
+    "/printer/objects/query?display_status=progress"
  ]
  
 endpoints_printing_status = [
     "/printer/objects/query?gcode_move=speed,speed_factor,extrude_factor",
-    "/printer/objects/query?display=progress"
+    "/printer/objects/query?display_status=progress"
  ]
 
 ##############################################################
@@ -117,7 +116,7 @@ def serial_thread():
 #Thread for Moonraker communication
 ##############################################################
 def moonraker_thread():
-    extruder_temp, extruder_tgt, heater_bed_temp, heater_bed_tgt, home_int, th_pos  = 0, 0, 0, 0, 0, [0,0,0,0] 
+    extruder_temp, extruder_tgt, heater_bed_temp, heater_bed_tgt, home_int, th_pos, print_progress, fan_speed = 0, 0, 0, 0, 0, [0,0,0,0], 0, 0
     th_pos_float = [0.0, 0.0, 0.0, 0.0]
     printer_state = ""
     while not shutdown_flag.is_set():
@@ -140,15 +139,21 @@ def moonraker_thread():
                         home_int <<= 1
                         if axis in home_string:
                             home_int += 1
-                elif 'idle_timeout' in response['result']['status']:
-                    printer_state =  response['result']['status']['idle_timeout']['state']
+                elif 'print_stats' in response['result']['status']:
+                    printer_state =  response['result']['status']['print_stats']['state']
+                elif 'fan' in response['result']['status']:
+                    fan_speed = response['result']['status']['fan']['speed']
+                    fan_speed = (fan_speed * 255) / 100
+                elif 'display_status' in response['result']['status']:
+                    print_progress_float = response['result']['status']['display_status']['progress']
+                    print_progress = int(100 * print_progress_float)
                 else:
                     print(endpoint + " data not available")
                     
                     
             else:
                 print("Failed to retrieve machine information.")
-        data_queue.put((extruder_temp, extruder_tgt, heater_bed_temp, heater_bed_tgt, home_int, th_pos, printer_state))
+        data_queue.put((extruder_temp, extruder_tgt, heater_bed_temp, heater_bed_tgt, home_int, th_pos, printer_state, print_progress, fan_speed))
         #time.sleep(1)
 
 ##############################################################
@@ -160,19 +165,24 @@ def main():
     
     threading.Thread(target=serial_thread, daemon=True).start()
     threading.Thread(target=moonraker_thread, daemon=True).start()
+    in_remote_print_job = False
 
     try:
         while not shutdown_flag.is_set():
             while not data_queue.empty():
                 data = data_queue.get()
                 if isinstance(data, tuple):
-                    extruder_temp, extruder_tgt, heater_bed_temp, heater_bed_tgt, home_int, th_pos, printer_state = data
-                    if printer_state == "printing" and in_remote_print_job == False:
-                        ser_write_upd("ok n:1\r\n")
-                        in_remote_print_job == True
-                    elif printer_state != "printing" and in_remote_print_job == True:
+                    extruder_temp, extruder_tgt, heater_bed_temp, heater_bed_tgt, home_int, th_pos, printer_state, print_progress, fan_speed = data
+                    if printer_state == "printing":
+                        if False == in_remote_print_job:
+                            ser_write_upd("ok n:1\r\n")
+                            in_remote_print_job = True
+                        ser_write_upd(f"ok T:{extruder_temp} t:{extruder_tgt} B:{heater_bed_temp} b:{heater_bed_tgt} R:{home_int} Z:{th_pos[2]} \r\n")
+                        ser_write_upd(f"ok m:{print_progress}\r\n")
+                        ser_write_upd(f"ok f:{fan_speed}")
+                    elif printer_state != "Printing" and True == in_remote_print_job:
                         ser_write_upd("ok n:2\r\n")
-                        in_remote_print_job == False
+                        in_remote_print_job = False
                 else:
                     uart_data = data
                     if uart_data.startswith("G") or uart_data.startswith("M104") or \
